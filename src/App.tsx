@@ -12,6 +12,7 @@ type Plane = {
   started: boolean;
   airborne: boolean;
   done: boolean;
+  takeoffSoundPlayed: boolean;
 };
 
 const planeNames: PlaneName[] = ["GILL", "BAINS", "GHUMAN"];
@@ -22,11 +23,179 @@ export default function App() {
   const animationRef = useRef<number | null>(null);
   const lastTimeRef = useRef(performance.now());
 
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const musicNodesRef = useRef<{
+    gain?: GainNode;
+    oscillators?: OscillatorNode[];
+    lfo?: OscillatorNode;
+  }>({});
+
+  const [soundOn, setSoundOn] = useState(true);
+  const [musicOn, setMusicOn] = useState(false);
+
   const [status, setStatus] = useState<Record<PlaneName, string>>({
     GILL: "Ready at runway",
     BAINS: "Ready at runway",
     GHUMAN: "Ready at runway",
   });
+
+  const getAudioContext = () => {
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new AudioContext();
+    }
+
+    if (audioCtxRef.current.state === "suspended") {
+      audioCtxRef.current.resume();
+    }
+
+    return audioCtxRef.current;
+  };
+
+  const playEngineSound = () => {
+    if (!soundOn) return;
+
+    const audio = getAudioContext();
+    const now = audio.currentTime;
+
+    const master = audio.createGain();
+    master.gain.setValueAtTime(0.0001, now);
+    master.gain.exponentialRampToValueAtTime(0.28, now + 0.25);
+    master.gain.exponentialRampToValueAtTime(0.10, now + 1.8);
+    master.gain.exponentialRampToValueAtTime(0.0001, now + 2.4);
+    master.connect(audio.destination);
+
+    const osc1 = audio.createOscillator();
+    const osc2 = audio.createOscillator();
+    const filter = audio.createBiquadFilter();
+
+    osc1.type = "sawtooth";
+    osc2.type = "triangle";
+    osc1.frequency.setValueAtTime(55, now);
+    osc1.frequency.exponentialRampToValueAtTime(170, now + 2.2);
+    osc2.frequency.setValueAtTime(90, now);
+    osc2.frequency.exponentialRampToValueAtTime(310, now + 2.2);
+
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(400, now);
+    filter.frequency.exponentialRampToValueAtTime(1800, now + 2.0);
+
+    osc1.connect(filter);
+    osc2.connect(filter);
+    filter.connect(master);
+
+    osc1.start(now);
+    osc2.start(now);
+    osc1.stop(now + 2.5);
+    osc2.stop(now + 2.5);
+  };
+
+  const playTakeoffSound = () => {
+    if (!soundOn) return;
+
+    const audio = getAudioContext();
+    const now = audio.currentTime;
+
+    const bufferSize = Math.floor(audio.sampleRate * 3.2);
+    const buffer = audio.createBuffer(1, bufferSize, audio.sampleRate);
+    const data = buffer.getChannelData(0);
+
+    for (let i = 0; i < bufferSize; i++) {
+      const fade = 1 - i / bufferSize;
+      data[i] = (Math.random() * 2 - 1) * fade;
+    }
+
+    const noise = audio.createBufferSource();
+    noise.buffer = buffer;
+
+    const filter = audio.createBiquadFilter();
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(450, now);
+    filter.frequency.exponentialRampToValueAtTime(1800, now + 1.8);
+    filter.Q.value = 0.7;
+
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.24, now + 0.3);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 3.0);
+
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(audio.destination);
+
+    noise.start(now);
+    noise.stop(now + 3.2);
+  };
+
+  const startMusic = () => {
+    const audio = getAudioContext();
+    const now = audio.currentTime;
+
+    stopMusic();
+
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.055, now + 0.8);
+    gain.connect(audio.destination);
+
+    const freqs = [130.81, 164.81, 196.0];
+    const oscillators = freqs.map((freq, i) => {
+      const osc = audio.createOscillator();
+      osc.type = i === 0 ? "sine" : "triangle";
+      osc.frequency.value = freq;
+
+      const localGain = audio.createGain();
+      localGain.gain.value = i === 0 ? 0.5 : 0.22;
+
+      osc.connect(localGain);
+      localGain.connect(gain);
+      osc.start();
+      return osc;
+    });
+
+    const lfo = audio.createOscillator();
+    const lfoGain = audio.createGain();
+
+    lfo.type = "sine";
+    lfo.frequency.value = 0.12;
+    lfoGain.gain.value = 0.018;
+
+    lfo.connect(lfoGain);
+    lfoGain.connect(gain.gain);
+    lfo.start();
+
+    musicNodesRef.current = { gain, oscillators, lfo };
+  };
+
+  const stopMusic = () => {
+    const nodes = musicNodesRef.current;
+
+    try {
+      nodes.oscillators?.forEach((osc) => osc.stop());
+      nodes.lfo?.stop();
+    } catch {}
+
+    try {
+      nodes.gain?.disconnect();
+    } catch {}
+
+    musicNodesRef.current = {};
+  };
+
+  const toggleMusic = () => {
+    const next = !musicOn;
+    setMusicOn(next);
+
+    if (next) startMusic();
+    else stopMusic();
+  };
+
+  const toggleSound = () => {
+    setSoundOn((old) => !old);
+  };
+
+  const startPlaneAudio = () => {
+    playEngineSound();
+  };
 
   const startAll = () => {
     planesRef.current.forEach((plane, index) => {
@@ -35,9 +204,12 @@ export default function App() {
           plane.started = true;
           plane.done = false;
           plane.airborne = false;
+          plane.takeoffSoundPlayed = false;
           plane.vx = 40;
           plane.vy = 0;
           plane.rot = 0;
+
+          startPlaneAudio();
 
           setStatus((old) => ({
             ...old,
@@ -55,7 +227,6 @@ export default function App() {
     const rect = canvas.getBoundingClientRect();
     const width = rect.width;
     const height = rect.height;
-
     const runwayY = (i: number) => height * 0.50 + i * height * 0.15;
 
     planesRef.current = planeNames.map((name, i) => ({
@@ -68,6 +239,7 @@ export default function App() {
       started: false,
       airborne: false,
       done: false,
+      takeoffSoundPlayed: false,
     }));
 
     setStatus({
@@ -101,6 +273,7 @@ export default function App() {
         started: false,
         airborne: false,
         done: false,
+        takeoffSoundPlayed: false,
       }));
     };
 
@@ -138,7 +311,6 @@ export default function App() {
       ctx.arc(width * 0.82, height * 0.12, 34, 0, Math.PI * 2);
       ctx.fill();
 
-      // terminal
       ctx.fillStyle = "#263a46";
       ctx.fillRect(width * 0.04, height * 0.30, width * 0.52, height * 0.12);
       ctx.fillStyle = "#314f60";
@@ -299,6 +471,12 @@ export default function App() {
         if (p.x > width * 0.58) {
           p.airborne = true;
           p.vy = -36;
+
+          if (!p.takeoffSoundPlayed) {
+            p.takeoffSoundPlayed = true;
+            playTakeoffSound();
+          }
+
           setStatus((old) => ({ ...old, [p.name]: "Airborne ✈" }));
         }
       } else {
@@ -327,10 +505,13 @@ export default function App() {
         p.rot = 0;
         p.airborne = false;
         p.done = false;
+        p.takeoffSoundPlayed = false;
       }
 
       p.started = true;
       p.vx = 40;
+      playEngineSound();
+
       setStatus((old) => ({
         ...old,
         [p.name]: "Rolling for takeoff...",
@@ -374,8 +555,10 @@ export default function App() {
       canvas.removeEventListener("click", onClick);
       window.removeEventListener("resize", resize);
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      stopMusic();
+      audioCtxRef.current?.close();
     };
-  }, []);
+  }, [soundOn]);
 
   return (
     <main className="page">
@@ -388,6 +571,12 @@ export default function App() {
           <div className="buttons">
             <button onClick={startAll}>Take Off All</button>
             <button className="secondary" onClick={resetAll}>Reset</button>
+            <button className="secondary" onClick={toggleSound}>
+              {soundOn ? "🔊 Plane Sound On" : "🔇 Plane Sound Off"}
+            </button>
+            <button className="secondary" onClick={toggleMusic}>
+              {musicOn ? "🎵 Music On" : "🎵 Music Off"}
+            </button>
           </div>
         </section>
 
